@@ -43,6 +43,8 @@ I will need to extract the scores information from the excel sheet. I will use p
 # * Libraries
 import os
 import pandas as pd
+import sqlite3
+from sqlalchemy import create_engine, Table, Column, Integer, String, Text, DateTime, MetaData
 
 
 # * Environment
@@ -75,58 +77,16 @@ mypd = mypd.transpose()
 
 
 # * Add column names
-mypd.columns = ["gamedate", "name", "roll1", "roll2", "roll3", "roll4",
-                "roll5", "roll6", "fullh", "same3", "same4", "strsm", "strlg",
-                "chanc", "yathz"]
-
-
-# * Split 'Vincent' and 'Stefanie' data
-vkpd = mypd[mypd['name'].isin(['Vincent'])]
-sbpd = mypd[mypd['name'].isin(['Stefanie'])]
+mypd.columns = [
+    "gamedate", "name", "roll1", "roll2", "roll3", "roll4", "roll5", "roll6",
+    "fullh", "same3", "same4", "strsm", "strlg", "chanc", "yathz"
+]
 
 
 # * Generate unique identifiers per game
 # For matching, the games need to have unique identifiers. The date (gamedate)
 # variable is not unique, as the time is not entered. So, I will need to create
 # a new ID that adds time, and unique times per game.
-
-# ** Function to create a unique gamedate ID from existing gamedate ID
-# def genuniq(ipd):
-
-#     # *** Unique game dates
-#     ugames = ipd.loc[:,"gamedate"].unique()
-
-#     # *** Loop over unique values
-#     for u in ugames:
-
-#         # Generate a range of unique consequtive numbers (the hours) for each
-#         # row for a given date. So, subset the df where the date is u, then
-#         # use this in a range function to generate the list of consequtive
-#         # numbers.
-#         ipd.loc["myhours"] = range(ipd.loc[ipd['gamedate'].isin([u])].shape[0])
-
-#         # Add a column with consequtive numbers in for the rows matching the date
-#         ipd.loc[ipd['gamedate'].isin([u]), 'hour'] = myhours
-
-#     # *** Merge the hours with the date
-#     # Convert to date/time column
-#     ipd.loc[:,"gamedate"] = pd.to_datetime(ipd.loc[:,"gamedate"])
-
-#     # Column
-#     ipd.loc[:,"gamedate"] = pd.to_datetime({
-#         "year": ipd.gamedate.dt.year,
-#         "month": ipd.gamedate.dt.month,
-#         "day": ipd.gamedate.dt.day,
-#         "hour": ipd.gamedate.myhours,
-#         "minute": 0,
-#         "second": 0
-#     })
-
-#     # *** Drop myhours column
-#     ipd = ipd.drop(columns = ["myhours"])
-
-#     # *** Return data frame object
-#     return(ipd)
 
 # ** Function to create a unique gamedate ID from existing gamedate ID
 def genuniq(ipd):
@@ -136,7 +96,10 @@ def genuniq(ipd):
     # *** Create myhours by grouping by date and counting from 0
     # The groupby method runs the 'cumcount' (cumulative count) by blocks of
     # unique gamedate values.
-    ipd["myhours"] = ipd.groupby("gamedate").cumcount()
+    ipd["myhours"] = ipd.groupby(["name", "gamedate"]).cumcount()
+
+    # *** Convert gamedate to datetime type variable
+    ipd["gamedate"] = pd.to_datetime(ipd["gamedate"])
 
     # *** Merge the hours with the date
     ipd["gamedate"] = pd.to_datetime({
@@ -151,58 +114,472 @@ def genuniq(ipd):
     return ipd.drop(columns=["myhours"])
 
 
-vkpd = genuniq(vkpd)
-sbpd = genuniq(sbpd)
+# ** Apply the function
+mypd = genuniq(mypd)
+
+
+# * Prepare the table for sql
+# Convert the gamedate and player names to foreign keys
+mypd_scores = mypd.copy()
+
+# ** Store column names without 'gamedata' and 'name'
+colheads = ["game_id", "player_id"]
+colheads.extend(mypd_scores.columns[2:].tolist())
+
+# ** Generate foreign key column for players
+mypd_scores["player_id"] = mypd_scores['name'].map({"Stefanie": 0, "Vincent": 1})
+
+# ** Generate foreign key column for games
+mypd_scores["game_id"] = mypd_scores.groupby(["gamedate"]).ngroup()
+
+# ** Drop the gamedate and name variables and order columns
+mypd_scores = mypd_scores[colheads]
+
+
+# * Create players table
+players_data = {'player_id': [0, 1], 'name': ["Stefanie", "Vincent"]}
+mypd_players = pd.DataFrame(players_data)
+
+
+# * Create games table
+mypd_games = pd.DataFrame(mypd["gamedate"].unique())
+mypd_games.columns = ["datetime"]
+mypd_games["game_id"] = range(1, len(mypd_games)+1)
+mypd_games = mypd_games[["game_id", "datetime"]]
+
+
+# * Store the tables into an sqlite database
+# ** Open the database
+engine = create_engine("sqlite:///" + odir + "/gamedata.sqlite")
+
+# ** Scores table
+# *** Meta data (empty object)
+metadata = MetaData()
+
+# *** For each table, set the column flags
+scores = Table(
+    "scores",
+    metadata,
+    Column("game_id", Integer, primary_key=False, nullable=False),
+    Column("player_id", Integer, primary_key=False, nullable=False),
+    Column("roll1", Integer),
+    Column("roll2", Integer),
+    Column("roll3", Integer),
+    Column("roll4", Integer),
+    Column("roll5", Integer),
+    Column("roll6", Integer),
+    Column("fullh", Integer),
+    Column("same3", Integer),
+    Column("same4", Integer),
+    Column("strsm", Integer),
+    Column("strlg", Integer),
+    Column("chanc", Integer),
+    Column("yathz", Integer),
+)
+
+scores = Table(
+    "players",
+    metadata,
+    Column("player_id", Integer, primary_key=True, nullable=False),
+    Column("name", Text, primary_key=False, nullable=False),
+)
+
+scores = Table(
+    "games",
+    metadata,
+    Column("game_id", Integer, primary_key=True, nullable=False),
+    Column("datetime", DateTime, primary_key=False, nullable=False),
+)
+
+# *** Drop all tables and create new tables in the database
+metadata.drop_all(engine)
+metadata.create_all(engine)
+
+# *** Write all tables to the database
+mypd_scores.to_sql(
+    "scores",
+    engine,
+    if_exists="append",
+    index=False
+)
+
+mypd_players.to_sql(
+    "players",
+    engine,
+    if_exists="append",
+    index=False
+)
+
+mypd_games.to_sql(
+    "games",
+    engine,
+    if_exists="append",
+    index=False
+)
 #+end_src
 
-* SQL Database
-I need to build multiple databases that can be linked.
+#+RESULTS:
+:results:
+Folder already exists!
+:end:
 
-** Create databases
+* Check the SQL database
 :PROPERTIES:
 :header-args:sqlite:  :tangle scripts/prepare_database.sql
 :header-args:sqlite+: :mkdirp yes
 :header-args:sqlite+: :session *prepare_datebase_sql*
+:header-args:sqlite+: :db database/gamedata.sqlite
+:header-args:sqlite+: :colnames yes
+:END:
+
+** Table schema
+#+begin_src sqlite
+.schema
+#+end_src
+
+#+RESULTS:
+:results:
+CREATE TABLE scores (
+	game_id INTEGER NOT NULL,
+	player_id INTEGER NOT NULL,
+	roll1 INTEGER,
+	roll2 INTEGER,
+	roll3 INTEGER,
+	roll4 INTEGER,
+	roll5 INTEGER,
+	roll6 INTEGER,
+	fullh INTEGER,
+	same3 INTEGER,
+	same4 INTEGER,
+	strsm INTEGER,
+	strlg INTEGER,
+	chanc INTEGER,
+	yathz INTEGER
+);
+CREATE TABLE players (
+	player_id INTEGER NOT NULL,
+	name TEXT NOT NULL,
+	PRIMARY KEY (player_id)
+);
+CREATE TABLE games (
+	game_id INTEGER NOT NULL,
+	datetime DATETIME NOT NULL,
+	PRIMARY KEY (game_id)
+);
+CREATE VIEW combitable AS
+SELECT
+players.name, games.datetime,
+scores.roll1, scores.roll2, scores.roll3, scores.roll4, scores.roll5,
+scores.roll6, scores.fullh, scores.same3, scores.same4, scores.strsm,
+scores.strlg, scores.chanc, scores.yathz FROM scores
+JOIN players ON scores.player_id = players.player_id
+JOIN games ON scores.game_id = games.game_id
+WHERE scores.name = "Stefanie" AND yathz > 50;
+:end:
+
+** COMMENT Overview
+:PROPERTIES:
+:header-args:sqlite+: :results output table
 :END:
 
 #+begin_src sqlite
-CREATE TABLE vincent (
-    name TEXT PRIMARY KEY NOT NULL,
-    gamedate DATETIME NOT NULL,
-    roll1 INTEGER,
-    roll2 INTEGER,
-    roll3 INTEGER,
-    roll4 INTEGER,
-    roll5 INTEGER,
-    roll6 INTEGER,
-    fullh INTEGER,
-    same3 INTEGER,
-    same4 INTEGER,
-    strsm INTEGER,
-    strlg INTEGER,
-    chanc INTEGER,
-    yathz INTEGER
-    );
-
-
--- Import the CSV into this table:
-.mode csv
-.import --skip 1 /datadisk/Private/Python/20251222_Yathzee/database/vincent.csv yathzee
-
-
-
-
-
-
--- Convert empty values to NULL
-UPDATE nomnom SET review = NULL WHERE TRIM(review) = '';
-UPDATE nomnom SET health = NULL WHERE TRIM(health) = '';
-
-
--- Information about table
--- .schema movies
-
-
--- Display names for the first four movies
-SELECT name FROM nomnom LIMIT 4;
+SELECT * FROM scores LIMIT 4;
 #+end_src
+
+#+RESULTS:
+:results:
+| game_id | player_id | roll1 | roll2 | roll3 | roll4 | roll5 | roll6 | fullh | same3 | same4 | strsm | strlg | chanc | yathz |
+|---------+-----------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------|
+|       0 |         0 |     1 |     4 |    12 |    16 |    15 |    24 |    25 |    23 |    29 |    30 |    40 |    18 |     0 |
+|       0 |         1 |     3 |     4 |     6 |    12 |    15 |    18 |    25 |    14 |     0 |    30 |    40 |    25 |    50 |
+|       1 |         0 |     3 |     4 |     9 |    12 |    15 |    18 |    25 |    27 |    18 |    30 |    40 |    23 |     0 |
+|       1 |         1 |     1 |     2 |     3 |    16 |    20 |    24 |    25 |    24 |    27 |    30 |    40 |    16 |     0 |
+:end:
+
+Display the games where Stefanie rolled Yathzee more than once
+#+begin_src sqlite
+SELECT * FROM scores
+WHERE player_id IS 0 AND yathz > 50;
+#+end_src
+
+#+RESULTS:
+:results:
+| game_id | player_id | roll1 | roll2 | roll3 | roll4 | roll5 | roll6 | fullh | same3 | same4 | strsm | strlg | chanc | yathz |
+|---------+-----------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------|
+|      18 |         0 |     1 |     2 |    12 |     4 |    15 |    18 |    25 |    26 |    27 |    30 |    40 |    25 |   100 |
+|      25 |         0 |     1 |     8 |     6 |     8 |    20 |    18 |    25 |    26 |    12 |    30 |    40 |    20 |   100 |
+|      33 |         0 |     0 |     4 |     3 |    12 |    20 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 |
+|      42 |         0 |     2 |     4 |     9 |    16 |    10 |    24 |    25 |    11 |     9 |    30 |    40 |    22 |   100 |
+|      62 |         0 |     1 |     6 |    12 |    16 |    15 |    24 |    25 |     8 |     9 |    30 |    40 |    22 |   100 |
+|      64 |         0 |     1 |     8 |     9 |    12 |    15 |    18 |    25 |    28 |    26 |    30 |     0 |    22 |   100 |
+|      85 |         0 |     1 |     4 |    12 |    12 |    15 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 |
+:end:
+
+Display the games where Stefanie rolled Yathzee more than once:
+- Include the player name
+- Include the game date
+
+#+begin_src sqlite
+SELECT scores.*, players.name, games.datetime FROM scores
+JOIN players ON scores.player_id = players.player_id
+JOIN games ON scores.game_id = games.game_id
+WHERE scores.player_id = 0 AND yathz > 50;
+#+end_src
+
+#+RESULTS:
+:results:
+| game_id | player_id | roll1 | roll2 | roll3 | roll4 | roll5 | roll6 | fullh | same3 | same4 | strsm | strlg | chanc | yathz | name     | datetime                   |
+|---------+-----------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+----------+----------------------------|
+|      18 |         0 |     1 |     2 |    12 |     4 |    15 |    18 |    25 |    26 |    27 |    30 |    40 |    25 |   100 | Stefanie | 2013-01-13 04:00:00.000000 |
+|      25 |         0 |     1 |     8 |     6 |     8 |    20 |    18 |    25 |    26 |    12 |    30 |    40 |    20 |   100 | Stefanie | 2013-01-19 00:00:00.000000 |
+|      33 |         0 |     0 |     4 |     3 |    12 |    20 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 | Stefanie | 2013-01-19 08:00:00.000000 |
+|      42 |         0 |     2 |     4 |     9 |    16 |    10 |    24 |    25 |    11 |     9 |    30 |    40 |    22 |   100 | Stefanie | 2013-01-20 07:00:00.000000 |
+|      62 |         0 |     1 |     6 |    12 |    16 |    15 |    24 |    25 |     8 |     9 |    30 |    40 |    22 |   100 | Stefanie | 2013-01-25 09:00:00.000000 |
+|      64 |         0 |     1 |     8 |     9 |    12 |    15 |    18 |    25 |    28 |    26 |    30 |     0 |    22 |   100 | Stefanie | 2013-01-25 11:00:00.000000 |
+|      85 |         0 |     1 |     4 |    12 |    12 |    15 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 | Stefanie | 2013-01-29 02:00:00.000000 |
+:end:
+
+Same as before, but now drop the game_id and player_id all together:
+
+#+begin_src sqlite
+-- I will create a temporary table that combines these data. Drop if it already
+-- exists
+DROP VIEW IF EXISTS combitable;
+
+
+-- Create the temporary table
+CREATE VIEW combitable AS
+SELECT
+players.name, games.datetime,
+scores.roll1, scores.roll2, scores.roll3, scores.roll4, scores.roll5,
+scores.roll6, scores.fullh, scores.same3, scores.same4, scores.strsm,
+scores.strlg, scores.chanc, scores.yathz FROM scores
+JOIN players ON scores.player_id = players.player_id
+JOIN games ON scores.game_id = games.game_id
+WHERE players.name = "Stefanie" AND scores.yathz > 50;
+
+
+-- View the remporary table
+SELECT * FROM combitable;
+#+end_src
+
+#+RESULTS:
+:results:
+| name     | datetime                   | roll1 | roll2 | roll3 | roll4 | roll5 | roll6 | fullh | same3 | same4 | strsm | strlg | chanc | yathz |
+|----------+----------------------------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------|
+| Stefanie | 2013-01-13 04:00:00.000000 |     1 |     2 |    12 |     4 |    15 |    18 |    25 |    26 |    27 |    30 |    40 |    25 |   100 |
+| Stefanie | 2013-01-19 00:00:00.000000 |     1 |     8 |     6 |     8 |    20 |    18 |    25 |    26 |    12 |    30 |    40 |    20 |   100 |
+| Stefanie | 2013-01-19 08:00:00.000000 |     0 |     4 |     3 |    12 |    20 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 |
+| Stefanie | 2013-01-20 07:00:00.000000 |     2 |     4 |     9 |    16 |    10 |    24 |    25 |    11 |     9 |    30 |    40 |    22 |   100 |
+| Stefanie | 2013-01-25 09:00:00.000000 |     1 |     6 |    12 |    16 |    15 |    24 |    25 |     8 |     9 |    30 |    40 |    22 |   100 |
+| Stefanie | 2013-01-25 11:00:00.000000 |     1 |     8 |     9 |    12 |    15 |    18 |    25 |    28 |    26 |    30 |     0 |    22 |   100 |
+| Stefanie | 2013-01-29 02:00:00.000000 |     1 |     4 |    12 |    12 |    15 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 |
+:end:
+
+Now, create a column that has 35 (the bonus) if roll1-roll6 >= 65:
+#+begin_src sqlite
+SELECT ((roll1 + roll2 + roll3 + roll4 + roll5 + roll6) > 64) * 35 AS bonus
+FROM combitable;
+#+end_src
+
+#+RESULTS:
+:results:
+| bonus |
+|-------|
+|     0 |
+|     0 |
+|     0 |
+|    35 |
+|    35 |
+|     0 |
+|    35 |
+:end:
+
+Include this column in the combitable table and also calculate the game total:
+¡fr¡Note¡/fr¡: The following does not work, because this is a VIEW and not a regular table. See the example below how to recreate the view instead.
+#+begin_src sqlite
+ALTER TABLE combitable
+ADD bonus INTERGER;
+
+UPDATE combitable
+SET bonus = ((roll1 + roll2 + roll3 + roll4 + roll5 + roll6) > 64) * 35;
+#+end_src
+
+#+RESULTS:
+:results:
+Parse error near line 2: Cannot add a column to a view
+Parse error near line 5: cannot modify combitable because it is a view
+:end:
+
+Note that you can't reference computed variables immediately after defining them; you have to create the table first. That is why I calculate the bonus and total later.
+#+begin_src sqlite
+-- I will create a temporary table that combines these data. Drop if it already
+-- exists
+DROP VIEW IF EXISTS combiview;
+
+
+-- Create the virtual table
+CREATE VIEW combiview AS
+SELECT
+players.name, games.datetime,
+scores.roll1, scores.roll2, scores.roll3, scores.roll4, scores.roll5,
+scores.roll6, scores.fullh, scores.same3, scores.same4, scores.strsm,
+scores.strlg, scores.chanc, scores.yathz,
+scores.roll1 + scores.roll2 + scores.roll3 + scores.roll4 + scores.roll5 + scores.roll6 AS topsum,
+scores.fullh + scores.same3 + scores.same4 + scores.strsm + scores.strlg + scores.chanc + scores.yathz AS botsum
+FROM scores
+JOIN players ON scores.player_id = players.player_id
+JOIN games ON scores.game_id = games.game_id
+WHERE players.name = "Stefanie" AND scores.yathz > 50;
+
+
+-- View the virtual table
+SELECT *,
+(topsum > 64) * 35 AS bonus,
+topsum + botsum + ((topsum > 64) * 35) AS total
+FROM combiview;
+#+end_src
+
+#+RESULTS:
+:results:
+| name     | datetime                   | roll1 | roll2 | roll3 | roll4 | roll5 | roll6 | fullh | same3 | same4 | strsm | strlg | chanc | yathz | topsum | botsum | bonus | total |
+|----------+----------------------------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+--------+--------+-------+-------|
+| Stefanie | 2013-01-13 04:00:00.000000 |     1 |     2 |    12 |     4 |    15 |    18 |    25 |    26 |    27 |    30 |    40 |    25 |   100 |     52 |    273 |     0 |   325 |
+| Stefanie | 2013-01-19 00:00:00.000000 |     1 |     8 |     6 |     8 |    20 |    18 |    25 |    26 |    12 |    30 |    40 |    20 |   100 |     61 |    253 |     0 |   314 |
+| Stefanie | 2013-01-19 08:00:00.000000 |     0 |     4 |     3 |    12 |    20 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 |     63 |    270 |     0 |   333 |
+| Stefanie | 2013-01-20 07:00:00.000000 |     2 |     4 |     9 |    16 |    10 |    24 |    25 |    11 |     9 |    30 |    40 |    22 |   100 |     65 |    237 |    35 |   337 |
+| Stefanie | 2013-01-25 09:00:00.000000 |     1 |     6 |    12 |    16 |    15 |    24 |    25 |     8 |     9 |    30 |    40 |    22 |   100 |     74 |    234 |    35 |   343 |
+| Stefanie | 2013-01-25 11:00:00.000000 |     1 |     8 |     9 |    12 |    15 |    18 |    25 |    28 |    26 |    30 |     0 |    22 |   100 |     63 |    231 |     0 |   294 |
+| Stefanie | 2013-01-29 02:00:00.000000 |     1 |     4 |    12 |    12 |    15 |    24 |    25 |    27 |    23 |    30 |    40 |    25 |   100 |     68 |    270 |    35 |   373 |
+:end:
+
+Find the date where I had my top score:
+#+begin_src sqlite
+-- I will create a temporary table that combines these data. Drop if it already
+-- exists
+DROP VIEW IF EXISTS combiview;
+DROP VIEW IF EXISTS results;
+
+
+-- Create the first virtual table
+CREATE VIEW combiview AS
+SELECT
+players.name, games.datetime,
+scores.roll1, scores.roll2, scores.roll3, scores.roll4, scores.roll5,
+scores.roll6, scores.fullh, scores.same3, scores.same4, scores.strsm,
+scores.strlg, scores.chanc, scores.yathz,
+scores.roll1 + scores.roll2 + scores.roll3 + scores.roll4 + scores.roll5 + scores.roll6 AS topsum,
+scores.fullh + scores.same3 + scores.same4 + scores.strsm + scores.strlg + scores.chanc + scores.yathz AS botsum
+FROM scores
+JOIN players ON scores.player_id = players.player_id
+JOIN games ON scores.game_id = games.game_id;
+
+
+-- Create the second virtual table
+CREATE VIEW results AS
+SELECT
+name,
+datetime,
+(topsum > 64) * 35 AS bonus,
+topsum + botsum + ((topsum > 64) * 35) AS total
+FROM combiview;
+
+
+-- Display the results
+SELECT name, datetime, MAX(total) AS max_total
+FROM results
+WHERE name = "Vincent"
+UNION
+SELECT name, datetime, MAX(total) AS max_total
+FROM results
+WHERE name = "Stefanie";
+#+end_src
+
+#+RESULTS:
+:results:
+| name     | datetime                   | max_total |
+|----------+----------------------------+-----------|
+| Stefanie | 2013-01-29 02:00:00.000000 |       373 |
+| Vincent  | 2013-01-25 09:00:00.000000 |       367 |
+:end:
+
+Alternatively, with temporary tables:
+#+begin_src sqlite
+WITH tmp_v AS (
+    SELECT name, datetime, MAX(total) AS max_total
+    FROM results
+    WHERE name = "Vincent"
+),
+tmp_s AS (
+    SELECT name, datetime, MAX(total) AS max_total
+    FROM results
+    WHERE name = "Stefanie"
+)
+SELECT * FROM tmp_v
+UNION
+SELECT * FROM tmp_s;
+#+end_src
+
+#+RESULTS:
+:results:
+| name     | datetime                   | max_total |
+|----------+----------------------------+-----------|
+| Stefanie | 2013-01-29 02:00:00.000000 |       373 |
+| Vincent  | 2013-01-25 09:00:00.000000 |       367 |
+:end:
+
+Display the average score for Vincent in February of 2013:
+#+begin_src sqlite
+-- I will create a temporary table that combines these data. Drop if it already
+-- exists
+DROP VIEW IF EXISTS combiview;
+DROP VIEW IF EXISTS results;
+
+
+-- Create the first virtual table
+CREATE VIEW combiview AS
+SELECT
+players.name, games.datetime,
+scores.roll1, scores.roll2, scores.roll3, scores.roll4, scores.roll5,
+scores.roll6, scores.fullh, scores.same3, scores.same4, scores.strsm,
+scores.strlg, scores.chanc, scores.yathz,
+scores.roll1 + scores.roll2 + scores.roll3 + scores.roll4 + scores.roll5 + scores.roll6 AS topsum,
+scores.fullh + scores.same3 + scores.same4 + scores.strsm + scores.strlg + scores.chanc + scores.yathz AS botsum
+FROM scores
+JOIN players ON scores.player_id = players.player_id
+JOIN games ON scores.game_id = games.game_id;
+
+
+-- Create the second virtual table
+CREATE VIEW results AS
+SELECT
+name,
+datetime,
+(topsum > 64) * 35 AS bonus,
+topsum + botsum + ((topsum > 64) * 35) AS total
+FROM combiview;
+
+
+-- Display the results
+SELECT name, total, datetime AS avg_total
+FROM results
+WHERE name = "Vincent" AND datetime > "2013-01-31" AND datetime < "2013-03-01"
+#+end_src
+
+¡fr¡This is incorrect, the dates are shifted from the data!¡/fr¡
+
+#+RESULTS:
+:results:
+| name    | total | avg_total                  |
+|---------+-------+----------------------------|
+| Vincent |   248 | 2013-02-02 00:00:00.000000 |
+| Vincent |   245 | 2013-02-02 01:00:00.000000 |
+| Vincent |   181 | 2013-02-08 00:00:00.000000 |
+| Vincent |   148 | 2013-02-08 01:00:00.000000 |
+| Vincent |   258 | 2013-02-08 02:00:00.000000 |
+| Vincent |   262 | 2013-02-08 03:00:00.000000 |
+| Vincent |   226 | 2013-02-09 00:00:00.000000 |
+| Vincent |   241 | 2013-02-09 01:00:00.000000 |
+| Vincent |   255 | 2013-02-09 02:00:00.000000 |
+| Vincent |   215 | 2013-02-09 03:00:00.000000 |
+:end:
